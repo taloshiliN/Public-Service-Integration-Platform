@@ -1,0 +1,91 @@
+resource isolated function post applyForPension(http:Caller caller, http:Request req) returns error? {
+    json payload = check req.getJsonPayload();
+    
+    // Call the logic function to handle the pension application process
+    json|error result = applyForPensionLogic(payload);
+
+    http:Response res = new;
+
+    // Check if the result is a success or an error
+    if result is json {
+        string status = result.status.toString();
+
+        if status == "success" {
+            // If the application is successful, send 200 with no JSON message
+            res.statusCode = 200;
+            check caller->respond(res);
+        } else if status == "exists" {
+            // If the application already exists, return 409 Conflict
+            res.statusCode = 409;
+            res.setPayload("Error: Pension application already exists. Status: " + result.applicationStatus.toString());
+            check caller->respond(res);
+        } else if status == "error" {
+            string message = result.message.toString();
+
+            // Handle specific error cases
+            if message == "User not found" {
+                res.statusCode = 404;
+                res.setPayload("Error: User not found");
+            } else {
+                // Generic error handling
+                res.statusCode = 400;
+                res.setPayload("Error: " + message);
+            }
+
+            check caller->respond(res);
+        }
+    } else if result is error {
+        // Handle unexpected errors
+        res.statusCode = 500;
+        res.setPayload("Internal server error");
+        check caller->respond(res);
+    }
+}
+
+
+isolated function applyForPensionLogic(json payload) returns json|error {
+    int userId = check payload.userId;
+
+    // Lock to check for existing pension applications
+    lock {
+        foreach var [_, application] in pensionApplications.entries() {
+            if application.user.id == userId {
+                return {status: "exists", applicationStatus: application.status};
+            }
+        }
+    }
+
+    User? user;
+
+    // Lock to access the users map and clone the user
+    lock {
+        user = users[userId.toString()].clone();
+    }
+
+    if user is User {
+        ApplicationForPension newApplication;
+
+        // Lock to create a new pension application and increment the next ID
+        lock {
+            newApplication = {
+                id: nextApplicationId + 1,
+                address: {streetName: check payload.address.streetName, poBox: check payload.address.poBox, city: check payload.address.city},
+                proofOfAddress: check payload.proofOfAddress,
+                user: user.clone(),
+                status: "Pending",
+                rejectionReason: ()
+            };
+            nextApplicationId += 1;
+        }
+
+        // Lock to insert the new pension application into the pensionApplications map
+        lock {
+            pensionApplications[newApplication.id.toString()] = newApplication.clone();
+        }
+
+        return {status: "success", message: "Pension application submitted successfully"};
+    } else {
+        // Return an error if the user is not found
+        return {status: "error", message: "User not found"};
+    }
+}
